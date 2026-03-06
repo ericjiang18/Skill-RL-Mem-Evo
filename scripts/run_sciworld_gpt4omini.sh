@@ -2,9 +2,8 @@
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate GMemory
 
-cd /local3/ericjiang/AgentMemory-new_organized
+cd "$(dirname "$0")/.." || exit 1
 
-# OpenAI API config for GPT-4o-mini
 export OPENAI_API_BASE="${OPENAI_API_BASE:-https://api.openai.com/v1}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-your-openai-api-key-here}"
 
@@ -15,4 +14,3 @@ python3 tasks/run.py \
     --mas_type skill-mas \
     --model gpt-4o-mini \
     --max_trials 40
-
