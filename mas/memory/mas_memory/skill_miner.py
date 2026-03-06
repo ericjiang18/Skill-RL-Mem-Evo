@@ -1,11 +1,20 @@
 """
 Skill Miner Module for G-Memory++
+
 Extracts reusable skills/macro-procedures from successful trajectories.
 Clusters similar trajectories and synthesizes generalizable skills.
+
+Enhancements (Claude Skills–inspired):
+- Lowered mining thresholds (min_cluster_size=2, trigger at 4 trajectories)
+- Parameterized steps with {object}/{target} placeholders
+- Execution tracking (total_uses, success_count, avg_steps_saved)
+- Auto-deactivation of poorly performing skills
+- Goal-pattern matching for fast skill lookup
 """
 
 import os
 import json
+import re
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
@@ -30,16 +39,18 @@ from .goal_module import StructuredGoal
 # ================================ Skill Prompts ================================
 
 SKILL_EXTRACTION_SYSTEM = """You are an expert at extracting reusable procedures from task execution logs.
-Given a set of similar successful task trajectories, synthesize a generalizable "skill" - a reusable procedure that can be applied to similar future tasks.
+Given a set of similar successful task trajectories, synthesize a generalizable "skill" — a reusable procedure that can be applied to similar future tasks.
 
-A skill should include:
-1. Name: A short, descriptive name for the skill
-2. Description: What the skill accomplishes
-3. Preconditions: What must be true before the skill can be applied
-4. Steps: The sequence of actions to perform
-5. Postconditions: What will be true after the skill is applied
+A skill must include:
+1. Name: A short, descriptive name
+2. Description: What the skill accomplishes and when to use it
+3. Goal Pattern: A pattern describing which tasks this skill applies to (use * as wildcard, e.g. "put * in/on *")
+4. Preconditions: What must be true before applying the skill
+5. Steps: The sequence of actions to perform. Use {object}, {target}, {location} as placeholders for task-specific items.
+6. Postconditions: What will be true after the skill succeeds
 
 The skill should be general enough to apply to similar situations, not specific to one instance.
+Use placeholders like {object}, {target}, {location} in steps to make them parameterized.
 """
 
 SKILL_EXTRACTION_USER = """## Goal Type: {goal_type}
@@ -50,7 +61,18 @@ SKILL_EXTRACTION_USER = """## Goal Type: {goal_type}
 ## Common Patterns Observed:
 {patterns}
 
-Generate a reusable skill based on these trajectories:
+Generate a reusable skill based on these trajectories. Output in this exact format:
+Name: <skill name>
+Description: <when to use this skill>
+Goal Pattern: <pattern with * wildcards>
+Preconditions:
+- <condition 1>
+- <condition 2>
+Steps:
+1. <step with {{object}}/{{target}} placeholders>
+2. <step>
+Postconditions:
+- <expected result>
 """
 
 SKILL_MATCHING_PROMPT = """Given the current task goal and available skills, determine which skill (if any) is applicable.
@@ -70,28 +92,27 @@ Your response (skill name or NONE):
 
 @dataclass
 class Skill:
-    """Represents a reusable skill/macro-procedure."""
+    """Represents a reusable skill/macro-procedure with execution tracking."""
     
     skill_id: str
     name: str
     description: str
-    goal_type: str  # The type of goal this skill addresses
+    goal_type: str
+    goal_pattern: str = ""
     
-    # Conditions
     preconditions: List[str] = field(default_factory=list)
     postconditions: List[str] = field(default_factory=list)
-    
-    # Procedure
     steps: List[str] = field(default_factory=list)
     
-    # Performance statistics
+    # Execution statistics
+    total_uses: int = 0
     success_count: int = 0
     failure_count: int = 0
+    avg_steps_saved: float = 0.0
     
-    # Supporting evidence
-    supporting_trajectories: List[str] = field(default_factory=list)  # Task IDs
+    active: bool = True
     
-    # Embedding for similarity search
+    supporting_trajectories: List[str] = field(default_factory=list)
     embedding: Optional[np.ndarray] = None
     
     @property
@@ -101,13 +122,52 @@ class Skill:
             return 0.5
         return self.success_count / total
     
+    def record_use(self, success: bool, steps_saved: float = 0.0):
+        """Record a skill usage and auto-deactivate if performing poorly."""
+        self.total_uses += 1
+        if success:
+            self.success_count += 1
+        else:
+            self.failure_count += 1
+        
+        if steps_saved > 0:
+            alpha = 1.0 / self.total_uses
+            self.avg_steps_saved = (1 - alpha) * self.avg_steps_saved + alpha * steps_saved
+        
+        # Auto-deactivate poorly performing skills
+        if self.total_uses >= 5 and self.success_rate < 0.3:
+            self.active = False
+    
+    def matches_goal(self, task_description: str) -> bool:
+        """Check if this skill's goal_pattern matches a task description."""
+        if not self.goal_pattern:
+            return False
+        
+        pattern = self.goal_pattern.replace('*', '.*')
+        try:
+            return bool(re.search(pattern, task_description, re.IGNORECASE))
+        except re.error:
+            return self.goal_pattern.lower() in task_description.lower()
+    
+    def instantiate_steps(self, task_objects: Dict[str, str]) -> List[str]:
+        """Replace placeholders in steps with actual task objects."""
+        result = []
+        for step in self.steps:
+            instantiated = step
+            for key, value in task_objects.items():
+                instantiated = instantiated.replace(f'{{{key}}}', value)
+            result.append(instantiated)
+        return result
+    
     def to_str(self) -> str:
-        """Convert skill to readable string."""
         parts = [
             f"### {self.name}",
             f"Description: {self.description}",
             f"Goal Type: {self.goal_type}",
         ]
+        
+        if self.goal_pattern:
+            parts.append(f"Applies to: {self.goal_pattern}")
         
         if self.preconditions:
             parts.append(f"Preconditions: {', '.join(self.preconditions)}")
@@ -119,7 +179,7 @@ class Skill:
         if self.postconditions:
             parts.append(f"Postconditions: {', '.join(self.postconditions)}")
         
-        parts.append(f"Success Rate: {self.success_rate:.1%}")
+        parts.append(f"Success Rate: {self.success_rate:.1%} ({self.total_uses} uses)")
         
         return "\n".join(parts)
     
@@ -129,11 +189,15 @@ class Skill:
             "name": self.name,
             "description": self.description,
             "goal_type": self.goal_type,
+            "goal_pattern": self.goal_pattern,
             "preconditions": self.preconditions,
             "postconditions": self.postconditions,
             "steps": self.steps,
+            "total_uses": self.total_uses,
             "success_count": self.success_count,
             "failure_count": self.failure_count,
+            "avg_steps_saved": self.avg_steps_saved,
+            "active": self.active,
             "supporting_trajectories": self.supporting_trajectories,
         }
     
@@ -144,11 +208,15 @@ class Skill:
             name=data["name"],
             description=data["description"],
             goal_type=data["goal_type"],
+            goal_pattern=data.get("goal_pattern", ""),
             preconditions=data.get("preconditions", []),
             postconditions=data.get("postconditions", []),
             steps=data.get("steps", []),
+            total_uses=data.get("total_uses", 0),
             success_count=data.get("success_count", 0),
             failure_count=data.get("failure_count", 0),
+            avg_steps_saved=data.get("avg_steps_saved", 0.0),
+            active=data.get("active", True),
             supporting_trajectories=data.get("supporting_trajectories", []),
         )
 
@@ -159,7 +227,7 @@ class TrajectoryRecord:
     
     task_id: str
     goal: StructuredGoal
-    trajectory: str  # Condensed trajectory text
+    trajectory: str
     key_steps: List[str] = field(default_factory=list)
     success: bool = True
     embedding: Optional[np.ndarray] = None
@@ -173,18 +241,18 @@ class SkillMiner:
     
     Process:
     1. Collect successful trajectories with their goals
-    2. Cluster trajectories by similarity
-    3. For each cluster, extract a generalizable skill
-    4. Maintain and update skills based on new evidence
+    2. Cluster trajectories by similarity (lowered thresholds)
+    3. For each cluster, extract a generalizable skill with parameterized steps
+    4. Track skill usage and auto-deactivate poor performers
     """
     
     def __init__(
         self,
         llm_model: LLMCallable,
-        embedding_func: Any,  # EmbeddingFunc
+        embedding_func: Any,
         working_dir: str,
-        min_cluster_size: int = 3,
-        similarity_threshold: float = 0.7
+        min_cluster_size: int = 2,
+        similarity_threshold: float = 0.65
     ):
         self.llm_model = llm_model
         self.embedding_func = embedding_func
@@ -192,15 +260,12 @@ class SkillMiner:
         self.min_cluster_size = min_cluster_size
         self.similarity_threshold = similarity_threshold
         
-        # Storage
-        self.skills: Dict[str, Skill] = {}  # skill_id -> Skill
+        self.skills: Dict[str, Skill] = {}
         self.pending_trajectories: List[TrajectoryRecord] = []
         
-        # Clustering
         self.trajectory_embeddings: List[np.ndarray] = []
         self.trajectory_ids: List[str] = []
         
-        # Paths
         self.skills_path = os.path.join(working_dir, "skills.json")
         self.pending_path = os.path.join(working_dir, "pending_trajectories.json")
         
@@ -214,14 +279,10 @@ class SkillMiner:
         key_steps: List[str],
         success: bool = True
     ):
-        """
-        Add a trajectory for potential skill extraction.
-        Only successful trajectories are useful for skill mining.
-        """
+        """Add a trajectory for potential skill extraction."""
         if not success:
             return
         
-        # Compute embedding
         embedding = self.embedding_func.embed_query(trajectory)
         
         record = TrajectoryRecord(
@@ -237,20 +298,17 @@ class SkillMiner:
         self.trajectory_embeddings.append(embedding)
         self.trajectory_ids.append(task_id)
         
-        # Check if we have enough for clustering
+        # Lowered trigger threshold: mine at 4 trajectories (was 6)
         if len(self.pending_trajectories) >= self.min_cluster_size * 2:
             self.mine_skills()
         
         self._save()
     
     def mine_skills(self) -> List[Skill]:
-        """
-        Cluster trajectories and extract skills from each cluster.
-        """
+        """Cluster trajectories and extract skills from each cluster."""
         if len(self.pending_trajectories) < self.min_cluster_size:
             return []
         
-        # Cluster trajectories
         clusters = self._cluster_trajectories()
         
         new_skills = []
@@ -258,17 +316,31 @@ class SkillMiner:
             if len(indices) >= self.min_cluster_size:
                 cluster_trajectories = [self.pending_trajectories[i] for i in indices]
                 
-                # Extract skill from cluster
                 skill = self._extract_skill_from_cluster(cluster_trajectories)
                 if skill:
-                    self.skills[skill.skill_id] = skill
-                    new_skills.append(skill)
+                    # Check for duplicate skills before adding
+                    if not self._is_duplicate_skill(skill):
+                        self.skills[skill.skill_id] = skill
+                        new_skills.append(skill)
         
-        # Clear processed trajectories (keep some for future clustering)
         self._prune_trajectories()
         self._save()
         
         return new_skills
+    
+    def _is_duplicate_skill(self, new_skill: Skill) -> bool:
+        """Check if a similar skill already exists."""
+        if not new_skill.embedding:
+            return False
+        
+        for existing in self.skills.values():
+            if existing.embedding is not None:
+                sim = np.dot(new_skill.embedding, existing.embedding) / (
+                    np.linalg.norm(new_skill.embedding) * np.linalg.norm(existing.embedding) + 1e-8
+                )
+                if sim > 0.9 and existing.goal_type == new_skill.goal_type:
+                    return True
+        return False
     
     def _cluster_trajectories(self) -> Dict[int, List[int]]:
         """Cluster trajectories by embedding similarity."""
@@ -277,26 +349,21 @@ class SkillMiner:
         
         embeddings = np.array(self.trajectory_embeddings)
         
-        # Also cluster by goal type
         goal_types = [t.goal.verb for t in self.pending_trajectories]
         unique_goals = list(set(goal_types))
         
         clusters = defaultdict(list)
         
         for goal_type in unique_goals:
-            # Get indices for this goal type
             goal_indices = [i for i, g in enumerate(goal_types) if g == goal_type]
             
             if len(goal_indices) < self.min_cluster_size:
                 continue
             
             goal_embeddings = embeddings[goal_indices]
-            
-            # Cluster within this goal type
             sub_clusters = self._cluster_embeddings(goal_embeddings)
             
             for sub_cluster_id, sub_indices in sub_clusters.items():
-                # Map back to original indices
                 original_indices = [goal_indices[i] for i in sub_indices]
                 cluster_key = f"{goal_type}_{sub_cluster_id}"
                 clusters[cluster_key] = original_indices
@@ -312,10 +379,7 @@ class SkillMiner:
         
         if HAS_FINCH:
             try:
-                # FINCH is a function, not a class
-                # Returns: c (NxP cluster labels), num_clust, req_c
                 c, num_clust, _ = FINCH(embeddings, distance='cosine', verbose=False)
-                # Use the first partition (finest clustering)
                 labels = c[:, 0] if c.ndim > 1 else c
             except Exception:
                 labels = self._simple_clustering(embeddings)
@@ -333,7 +397,6 @@ class SkillMiner:
         else:
             labels = self._simple_clustering(embeddings)
         
-        # Group by cluster
         clusters = defaultdict(list)
         for i, label in enumerate(labels):
             clusters[label].append(i)
@@ -352,7 +415,6 @@ class SkillMiner:
             
             labels[i] = current_label
             
-            # Find similar embeddings
             for j in range(i + 1, n):
                 if labels[j] >= 0:
                     continue
@@ -376,16 +438,13 @@ class SkillMiner:
         if not trajectories:
             return None
         
-        # Find common goal type
         goal_type = trajectories[0].goal.verb
         
-        # Collect trajectory texts
         trajectory_texts = "\n---\n".join([
             f"Task: {t.goal.raw_task}\nSteps:\n" + "\n".join(f"- {s}" for s in t.key_steps)
-            for t in trajectories[:5]  # Limit to avoid token explosion
+            for t in trajectories[:5]
         ])
         
-        # Find common patterns
         all_steps = [step for t in trajectories for step in t.key_steps]
         step_counts = defaultdict(int)
         for step in all_steps:
@@ -393,11 +452,10 @@ class SkillMiner:
         
         common_patterns = [
             step for step, count in step_counts.items()
-            if count >= len(trajectories) * 0.5  # Appears in at least 50% of trajectories
+            if count >= len(trajectories) * 0.4
         ]
         patterns_text = "\n".join(f"- {p}" for p in common_patterns[:10]) if common_patterns else "No clear common patterns"
         
-        # Use LLM to synthesize skill
         try:
             response = self.llm_model(
                 messages=[
@@ -426,51 +484,46 @@ class SkillMiner:
         trajectories: List[TrajectoryRecord]
     ) -> Optional[Skill]:
         """Parse LLM response into a Skill object."""
-        import re
-        
-        # Try to extract structured information
         name = ""
         description = ""
+        goal_pattern = ""
         preconditions = []
         postconditions = []
         steps = []
         
-        # Parse name
         name_match = re.search(r'(?:Name|Skill):\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
         if name_match:
             name = name_match.group(1).strip()
         else:
             name = f"skill_{goal_type}"
         
-        # Parse description
-        desc_match = re.search(r'Description:\s*(.+?)(?:\n\n|Preconditions|Steps)', response, re.IGNORECASE | re.DOTALL)
+        desc_match = re.search(r'Description:\s*(.+?)(?:\n\n|Preconditions|Goal Pattern|Steps)', response, re.IGNORECASE | re.DOTALL)
         if desc_match:
             description = desc_match.group(1).strip()
         else:
             description = f"Skill for {goal_type} tasks"
         
-        # Parse preconditions
+        pattern_match = re.search(r'Goal Pattern:\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
+        if pattern_match:
+            goal_pattern = pattern_match.group(1).strip()
+        
         pre_match = re.search(r'Preconditions?:\s*(.+?)(?:\n\n|Postconditions|Steps)', response, re.IGNORECASE | re.DOTALL)
         if pre_match:
             pre_text = pre_match.group(1)
             preconditions = [p.strip().lstrip('- ') for p in pre_text.split('\n') if p.strip()]
         
-        # Parse steps
         steps_match = re.search(r'Steps?:\s*(.+?)(?:\n\n|Postconditions|$)', response, re.IGNORECASE | re.DOTALL)
         if steps_match:
             steps_text = steps_match.group(1)
             steps = [s.strip().lstrip('0123456789.- ') for s in steps_text.split('\n') if s.strip()]
         
-        # Parse postconditions
         post_match = re.search(r'Postconditions?:\s*(.+?)(?:\n\n|$)', response, re.IGNORECASE | re.DOTALL)
         if post_match:
             post_text = post_match.group(1)
             postconditions = [p.strip().lstrip('- ') for p in post_text.split('\n') if p.strip()]
         
-        # Generate skill ID
         skill_id = f"skill_{goal_type}_{len(self.skills)}"
         
-        # Compute embedding from description + steps
         skill_text = f"{name} {description} " + " ".join(steps)
         embedding = self.embedding_func.embed_query(skill_text)
         
@@ -479,6 +532,7 @@ class SkillMiner:
             name=name,
             description=description,
             goal_type=goal_type,
+            goal_pattern=goal_pattern,
             preconditions=preconditions,
             postconditions=postconditions,
             steps=steps,
@@ -491,28 +545,23 @@ class SkillMiner:
         goal: StructuredGoal,
         top_k: int = 3
     ) -> List[Tuple[Skill, float]]:
-        """
-        Retrieve relevant skills for a goal.
-        
-        Args:
-            goal: The current goal
-            top_k: Number of skills to return
-        
-        Returns:
-            List of (Skill, similarity_score) tuples
-        """
+        """Retrieve relevant active skills for a goal."""
         if not self.skills:
             return []
         
-        # Filter by goal type first
-        matching_type = [s for s in self.skills.values() if s.goal_type == goal.verb]
+        # Only consider active skills
+        active_skills = [s for s in self.skills.values() if s.active]
+        if not active_skills:
+            return []
         
-        if matching_type:
-            candidates = matching_type
+        # Fast path: goal_pattern match
+        pattern_matches = [s for s in active_skills if s.matches_goal(goal.raw_task)]
+        if pattern_matches:
+            candidates = pattern_matches
         else:
-            candidates = list(self.skills.values())
+            matching_type = [s for s in active_skills if s.goal_type == goal.verb]
+            candidates = matching_type if matching_type else active_skills
         
-        # Compute similarity
         goal_text = goal.to_str()
         goal_embedding = self.embedding_func.embed_query(goal_text)
         
@@ -525,45 +574,46 @@ class SkillMiner:
             else:
                 sim = 1.0 if skill.goal_type == goal.verb else 0.5
             
-            # Boost by success rate
-            score = sim * (0.5 + 0.5 * skill.success_rate)
+            sr_boost = 0.5 + 0.5 * skill.success_rate
+            score = sim * sr_boost
             scored.append((skill, float(score)))
         
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
     
-    def update_skill_stats(self, skill_id: str, success: bool):
-        """Update skill statistics after use."""
+    def update_skill_stats(self, skill_id: str, success: bool, steps_saved: float = 0.0):
+        """Update skill statistics after use, with auto-deactivation."""
         if skill_id in self.skills:
-            if success:
-                self.skills[skill_id].success_count += 1
-            else:
-                self.skills[skill_id].failure_count += 1
+            self.skills[skill_id].record_use(success, steps_saved)
             self._save()
     
     def get_skill_by_id(self, skill_id: str) -> Optional[Skill]:
-        """Get a skill by its ID."""
         return self.skills.get(skill_id)
     
+    def get_active_skills(self) -> List[Skill]:
+        """Get all active skills."""
+        return [s for s in self.skills.values() if s.active]
+    
+    def reactivate_skill(self, skill_id: str):
+        """Manually reactivate a deactivated skill."""
+        if skill_id in self.skills:
+            self.skills[skill_id].active = True
+            self._save()
+    
     def _prune_trajectories(self):
-        """Remove old trajectories to prevent unbounded growth."""
         max_pending = 100
         if len(self.pending_trajectories) > max_pending:
-            # Keep the most recent
             self.pending_trajectories = self.pending_trajectories[-max_pending:]
             self.trajectory_embeddings = self.trajectory_embeddings[-max_pending:]
             self.trajectory_ids = self.trajectory_ids[-max_pending:]
     
     def _save(self):
-        """Persist skills and pending trajectories."""
         os.makedirs(self.working_dir, exist_ok=True)
         
-        # Save skills
         skills_data = {skill_id: skill.to_dict() for skill_id, skill in self.skills.items()}
         with open(self.skills_path, 'w') as f:
             json.dump(skills_data, f, indent=2)
         
-        # Save pending trajectories (without embeddings for JSON)
         pending_data = []
         for t in self.pending_trajectories:
             pending_data.append({
@@ -577,8 +627,6 @@ class SkillMiner:
             json.dump(pending_data, f, indent=2)
     
     def _load(self):
-        """Load skills and pending trajectories."""
-        # Load skills
         if os.path.exists(self.skills_path):
             try:
                 with open(self.skills_path, 'r') as f:
@@ -586,14 +634,12 @@ class SkillMiner:
                 
                 for skill_id, data in skills_data.items():
                     skill = Skill.from_dict(data)
-                    # Recompute embedding
                     skill_text = f"{skill.name} {skill.description} " + " ".join(skill.steps)
                     skill.embedding = self.embedding_func.embed_query(skill_text)
                     self.skills[skill_id] = skill
             except Exception as e:
                 print(f"Failed to load skills: {e}")
         
-        # Load pending trajectories
         if os.path.exists(self.pending_path):
             try:
                 with open(self.pending_path, 'r') as f:
@@ -616,4 +662,3 @@ class SkillMiner:
                     self.trajectory_ids.append(data["task_id"])
             except Exception as e:
                 print(f"Failed to load pending trajectories: {e}")
-

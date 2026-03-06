@@ -58,4 +58,3 @@ NOTE:
 
 - You must check carefully whether your output command is consistent with the allowed commands above!!! Any output that is not among the commands listed above is not permitted!!!
 """
-

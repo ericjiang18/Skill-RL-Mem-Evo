@@ -10,10 +10,8 @@ build/
 
 # Data & DB (too large for git)
 .db/
-data/alfworld/
-data/fever/
-data/pddl/
-data/ScreenSpot-Pro/
+data/
+notes/
 
 # IDE
 .vscode/

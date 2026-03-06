@@ -3,7 +3,7 @@ from typing import Type
 from .reasoning import ReasoningBase, ReasoningIO
 from .memory import *
 from .memory.mas_memory.gmemory_plus import GMemoryPlus
-from .memory.mas_memory.goal_rl_integration import GoalRLMemory
+from .memory.mas_memory.skill_memory import SkillMemory
 
 def module_map(
     reasoning: str, mas_memory: str = None
@@ -18,9 +18,13 @@ def module_map(
         'g-memory-plus': GMemoryPlus,
         'gmemory-plus': GMemoryPlus,
         'gm+': GMemoryPlus,
-        'goal-rl': GoalRLMemory,
-        'goal-rl-memory': GoalRLMemory,
-        'grl': GoalRLMemory,
+        'skill-memory': SkillMemory,
+        'skill-rl': SkillMemory,
+        'srl': SkillMemory,
+        # backward compat
+        'goal-rl': SkillMemory,
+        'goal-rl-memory': SkillMemory,
+        'grl': SkillMemory,
     }
 
     if reasoning not in reasoning_map:

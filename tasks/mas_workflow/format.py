@@ -1,3 +1,118 @@
+"""
+Prompt formatting for MAS workflow.
+
+Two-tier prompt structure:
+  1. System context — set once at task start (few_shots, memory, insights, skills)
+  2. Step prompt   — updated each step (sliding window + current observation)
+"""
+
+# ======================== System Context (set once) ========================
+
+_system_context_template = """\
+## Successful Examples (Reference Cases)
+Below are some examples of similar tasks that were successfully completed.
+Use these as references to guide your thinking and approach:
+
+{few_shots}
+---
+
+## Your Own Past Successes (Execution Patterns)
+Past successful execution processes on similar tasks.
+Pay attention to step-by-step procedures and strategies:
+
+{memory_few_shots}
+---
+
+## Key Insights from Related Tasks
+{insights}
+---
+{skills_section}\
+"""
+
+# ======================== Step Prompt (per step) ========================
+
+_step_prompt_template = """\
+## Task Environment
+{initial_observation}
+
+## Current Task
+{task_goal}
+
+## Recent History (last {window_size} steps)
+{sliding_window}
+
+## Current Observation
+{current_observation}
+{extra_context}"""
+
+
+# ======================== Public API ========================
+
+def build_system_context(
+    few_shots: list[str],
+    memory_few_shots: list[str],
+    insights: list[str],
+    skills_text: str = "",
+) -> str:
+    """Build the system-level context string. Called once per task."""
+    insights_text = '\n'.join(
+        f'{i}. {r}' for i, r in enumerate(insights, 1)
+    ) if insights else "(No insights available yet)"
+
+    memory_text = '\n\n'.join(
+        f"Task {i+1}:\n{shot}" for i, shot in enumerate(memory_few_shots)
+    ) if memory_few_shots else "(No past successes retrieved)"
+
+    skills_section = ""
+    if skills_text:
+        skills_section = f"\n{skills_text}\n---\n"
+
+    return _system_context_template.format(
+        few_shots='\n'.join(few_shots) if few_shots else "(No reference examples)",
+        memory_few_shots=memory_text,
+        insights=insights_text,
+        skills_section=skills_section,
+    )
+
+
+def build_step_prompt(
+    task_goal: str,
+    action_obs_window: list[tuple[str, str]],
+    current_observation: str,
+    initial_observation: str = "",
+    loop_warning: str = "",
+    policy_hint: str = "",
+    think_buffer: str = "",
+) -> str:
+    """Build the per-step user prompt with a sliding window of recent history."""
+    window_lines = []
+    for i, (act, obs) in enumerate(action_obs_window, 1):
+        window_lines.append(f"[Step {i}] Action: {act}")
+        obs_short = obs[:500] if len(obs) > 500 else obs
+        window_lines.append(f"  Observation: {obs_short}")
+
+    sliding_text = '\n'.join(window_lines) if window_lines else "(Task just started — no history yet)"
+
+    extra_parts = []
+    if think_buffer:
+        extra_parts.append(f"\n## Your Recent Thoughts\n{think_buffer}")
+    if policy_hint:
+        extra_parts.append(f"\n{policy_hint}")
+    if loop_warning:
+        extra_parts.append(f"\n{loop_warning}")
+
+    return _step_prompt_template.format(
+        task_goal=task_goal,
+        initial_observation=initial_observation,
+        window_size=len(action_obs_window),
+        sliding_window=sliding_text,
+        current_observation=current_observation,
+        extra_context=''.join(extra_parts),
+    )
+
+
+# ======================== Legacy helpers (backward compat) ========================
+
 task_solve_with_insights = """
 ## Successful Examples (Reference Cases)
 Below are some examples of similar tasks that were successfully completed.  

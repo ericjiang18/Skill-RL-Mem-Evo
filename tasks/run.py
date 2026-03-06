@@ -14,7 +14,7 @@ from mas.agents import Agent
 from mas.module_map import module_map
 from mas.reasoning import ReasoningBase
 from mas.memory import MASMemoryBase
-from mas.llm import LLMCallable, GPTChat, QwenChat, get_price
+from mas.llm import LLMCallable, GPTChat, QwenChat, GeminiChat, get_price
 from mas.mas import MetaMAS
 from mas.utils import EmbeddingFunc
 
@@ -70,16 +70,17 @@ def build_task(task: str, mas_type: str, memory_type: str, max_steps: int) -> Ta
 def get_llm_model(model_type: str) -> LLMCallable:
     """
     Get the appropriate LLM model based on model type.
-    Supports both OpenAI models and Qwen models (via Idealab API).
+    Supports OpenAI, Qwen (Idealab), and Gemini (Google AI).
     """
-    # Qwen models (use Idealab API like AgentNet)
     qwen_models = ['qwen3-flash', 'qwen3-max', 'qwen-turbo', 'qwen-plus', 'qwen3-vl-flash']
-    
+
     if model_type.lower() in qwen_models or model_type.lower().startswith('qwen'):
         print(f"Using Qwen model: {model_type}")
         return QwenChat(model_name=model_type, use_idealab=True)
+    elif model_type.lower().startswith('gemini'):
+        print(f"Using Gemini model: {model_type}")
+        return GeminiChat(model_name=model_type)
     else:
-        # OpenAI-compatible models
         print(f"Using OpenAI model: {model_type}")
         return GPTChat(model_name=model_type)
 
@@ -140,8 +141,8 @@ if __name__ == '__main__':
     random.seed(42)
 
     parser = argparse.ArgumentParser(description='Run tasks with specified modules.')
-    parser.add_argument('--task', type=str, choices=['alfworld', 'sciworld'])
-    parser.add_argument('--mas_type', type=str, choices=['autogen', 'macnet', 'dylan', 'goal-gcn', 'goalrl', 'gcn'])
+    parser.add_argument('--task', type=str, choices=['alfworld', 'sciworld', 'pddl', 'math'])
+    parser.add_argument('--mas_type', type=str, choices=['autogen', 'macnet', 'dylan', 'skill-mas', 'skill', 'gcn', 'goal-gcn', 'goalrl'])
     parser.add_argument('--mas_memory', type=str, default='none', help='Specify mas memory module')
     parser.add_argument('--reasoning', type=str, default='io', help='Specify reasoning module')
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0125', help='Specify the LLM model type')
@@ -163,7 +164,7 @@ if __name__ == '__main__':
     reasoning_type: str = args.reasoning
     
     # dir
-    WORKING_DIR = os.path.join('./.db', get_model_type(model_type), task, mas_type, f'{mas_memory_type}')
+    WORKING_DIR = os.path.join('./.db', get_model_type(model_type), task, mas_type)
     # if os.path.exists(WORKING_DIR):
     #     shutil.rmtree(WORKING_DIR)
     os.makedirs(WORKING_DIR, exist_ok=True)

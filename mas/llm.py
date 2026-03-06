@@ -110,9 +110,9 @@ class GPTChat(LLM):
                 response = self.client.chat.completions.create(
                     model=self.model_name,  
                     messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    n=num_comps,
+                    max_tokens=max_tokens or MAX_TOKEN,
+                    temperature=temperature or TEMPERATURE,
+                    n=num_comps or NUM_COMPS,
                     stop=stop_strs
                 )
 
@@ -246,6 +246,98 @@ class QwenChat(LLM):
                     return ""
                 time.sleep(10 * (attempt + 1))  # Progressive backoff: 10s, 20s, 30s
         
+        return ""
+
+
+# ================================ Gemini LLM (Google AI) ================================
+
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+
+class GeminiChat(LLM):
+    """
+    Gemini LLM using Google's OpenAI-compatible endpoint.
+    No extra dependencies — reuses the openai library.
+
+    Gemini 2.5 Flash is a thinking model: internal reasoning tokens consume
+    the max_tokens budget.  We enforce a floor (THINKING_TOKEN_FLOOR) so the
+    model always has room for both thinking and the actual response.
+    """
+
+    THINKING_TOKEN_FLOOR = 4096
+    MIN_REQUEST_INTERVAL = 1.0
+
+    def __init__(self, model_name: str = "gemini-2.5-flash", api_key: str = None):
+        super().__init__(model_name=model_name)
+        self.api_key = api_key or GOOGLE_API_KEY
+        if not self.api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY env var is required for Gemini models. "
+                "Set it via: export GOOGLE_API_KEY=your_key"
+            )
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+        self._last_call_time = 0.0
+        print(f"GeminiChat initialized with model={model_name}")
+
+    def __call__(
+        self,
+        messages: List[Message],
+        temperature: float = TEMPERATURE,
+        max_tokens: int = MAX_TOKEN,
+        stop_strs: Optional[List[str]] = None,
+        num_comps: int = NUM_COMPS,
+    ) -> str:
+        global prompt_tokens, completion_tokens
+
+        effective_max = max(max_tokens or MAX_TOKEN, self.THINKING_TOKEN_FLOOR)
+        messages_dict = [{"role": msg.role, "content": msg.content} for msg in messages]
+
+        elapsed = time.time() - self._last_call_time
+        if elapsed < self.MIN_REQUEST_INTERVAL:
+            time.sleep(self.MIN_REQUEST_INTERVAL - elapsed)
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                kwargs = dict(
+                    model=self.model_name,
+                    messages=messages_dict,
+                    max_tokens=effective_max,
+                    temperature=temperature,
+                )
+                if stop_strs:
+                    kwargs["stop"] = stop_strs
+
+                response = self.client.chat.completions.create(**kwargs)
+                answer = response.choices[0].message.content
+
+                if response.usage:
+                    prompt_tokens += response.usage.prompt_tokens
+                    completion_tokens += response.usage.completion_tokens
+
+                self._last_call_time = time.time()
+
+                if answer is None:
+                    if attempt < MAX_RETRIES - 1:
+                        effective_max = min(effective_max * 2, 16384)
+                        print(f"Gemini returned None (thinking budget exhausted?), "
+                              f"retrying with max_tokens={effective_max}...")
+                    continue
+                return answer
+
+            except Exception as e:
+                error_message = str(e)
+                if "429" in error_message or "rate" in error_message.lower():
+                    wait = 4 * (attempt + 1)
+                    print(f"Gemini rate-limited, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"Gemini API error (attempt {attempt + 1}): {error_message}")
+                    if attempt == MAX_RETRIES - 1:
+                        return ""
+                    time.sleep(3 * (attempt + 1))
+
         return ""
 
 

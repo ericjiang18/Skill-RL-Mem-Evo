@@ -256,9 +256,8 @@ class GMemory(MASMemoryBase):
         return response
 
     def backward(self, reward: bool):
-
         for insight in self.insights_cache:
-            self.insights_layer.backward(insight, reward=-2 if reward == False else 1)
+            self.insights_layer.backward(insight, reward=-1 if reward == False else 0.5)
 
         self.insights_cache = []
     

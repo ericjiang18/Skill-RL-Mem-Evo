@@ -90,11 +90,36 @@ class AlfworldEnv(BaseEnv):
         action = action.strip().replace('<', '').split('\n')[0]
         action = action.replace('>', '').replace('OK.', '').replace('OK', '').strip()
 
+        lower = action.lower().strip()
+
+        # "look around ..." / "look" with any suffix → just "look"
+        if lower == 'look' or lower.startswith('look around'):
+            return 'look'
+
+        # "look at X" → "examine X" (ALFWorld doesn't have "look at")
+        look_at = re.match(r'look\s+at\s+(.+)', action, re.IGNORECASE)
+        if look_at:
+            return f'examine {look_at.group(1).strip()}'
+
+        # "check X" → "examine X"
+        check = re.match(r'check\s+(.+)', action, re.IGNORECASE)
+        if check:
+            return f'examine {check.group(1).strip()}'
+
+        # "pick up X from Y" → "take X from Y"
+        pick_up = re.match(r'pick\s+up\s+(.+)', action, re.IGNORECASE)
+        if pick_up:
+            return f'take {pick_up.group(1).strip()}'
+
+        # "move to X" / "walk to X" → "go to X"
+        move_to = re.match(r'(?:move|walk)\s+to\s+(.+)', action, re.IGNORECASE)
+        if move_to:
+            return f'go to {move_to.group(1).strip()}'
+
         # TextWorld uses "move X to Y" instead of "put X in/on Y".
-        # Translate the LLM-generated put format to the environment's move format.
         put_match = re.match(r'put\s+(.+?)\s+(?:in/on|in|on)\s+(.+)', action, re.IGNORECASE)
         if put_match:
-            action = f'move {put_match.group(1).strip()} to {put_match.group(2).strip()}'
+            return f'move {put_match.group(1).strip()} to {put_match.group(2).strip()}'
 
         return action
     

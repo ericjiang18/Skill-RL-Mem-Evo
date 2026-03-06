@@ -318,7 +318,7 @@ the first one is correct, and the second one is incorrect, The reason for failur
 
 Requirements:
 - Convert the reasons for failure into insights for future agents to reference, in order to avoid making the same mistakes.
-- The insights you summarize must follow the "XXX, because XXX" format. They should not mention specific items but should instead extract general success principles applicable to similar tasks. These insights must be enlightening and provide guidance for future problems.  
+- The insights you summarize must follow the "XXX, because XXX" format. You should abstract specific objects into their functional roles (e.g., 'a container', 'a prerequisite tool' instead of 'boot' or 'wrench') but you MUST retain the specific logical or physical constraints violated in the failed attempt (e.g., 'always open a container before fetching its contents'). These insights must be enlightening and provide specific guidance for future problems.  
 
 """
 
@@ -350,7 +350,7 @@ critique_success_rules_user_prompt = """
 - Avoid vague statements; ensure each insight has a clear causal relationship.  
 - Focus only on strategies that apply to a broad range of scenarios rather than case-specific advice.  
 - Keep the language concise and to the point, ensuring clarity and practical value.  
-- The insights you summarize must follow the "XXX, because XXX" format. They should not mention specific items but should instead extract general success principles applicable to similar tasks. These insights must be enlightening and provide guidance for future problems.  
+- The insights you summarize must follow the "XXX, because XXX" format. You should abstract specific objects into their functional roles (e.g., 'a container', 'a prerequisite tool' instead of 'boot' or 'wrench') but you MUST retain the specific logical or physical constraints explicitly (e.g., 'always open a container before fetching its contents'). These insights must be enlightening and provide specific guidance for future problems.  
 
 ## Examples:  
 - Eliminate unnecessary thinking, because focusing on core objectives improves execution efficiency.

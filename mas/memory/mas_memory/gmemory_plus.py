@@ -28,14 +28,12 @@ class GMemoryPlusConfig:
     """Configuration for G-Memory++"""
     
     enable_goal_module: bool = True
-    # enable_prompt_evolution: bool = False
     enable_skill_miner: bool = True
     
     use_llm_for_goal_parsing: bool = False
-    # prompt_evolution_config: Optional[PromptEvolutionConfig] = None
     
-    min_cluster_size: int = 3
-    skill_similarity_threshold: float = 0.7
+    min_cluster_size: int = 2
+    skill_similarity_threshold: float = 0.65
 
 
 @dataclass
@@ -223,6 +221,11 @@ class GMemoryPlus(GMemory):
     # ================================ Memory Management ================================
     
     def add_memory(self, mas_message: MASMessage) -> None:
+        mas_message = self.refine_memory(mas_message)
+        
+        if mas_message.get_extra_field('deduplicated'):
+            return
+        
         super().add_memory(mas_message)
         
         if self.skill_miner and mas_message.label == True:
@@ -257,15 +260,107 @@ class GMemoryPlus(GMemory):
         if not skills:
             return ""
         
-        parts = ["## Relevant Skills from Past Experience:"]
-        for skill in skills[:max_skills]:
-            parts.append(f"\n### {skill.name}")
-            parts.append(f"Description: {skill.description}")
+        active_skills = [s for s in skills if s.active][:max_skills]
+        if not active_skills:
+            return ""
+        
+        parts = ["## Relevant Skills from Past Experience"]
+        parts.append("These are proven procedures for similar tasks. Follow them unless the situation requires deviation.\n")
+        for skill in active_skills:
+            parts.append(f"### {skill.name} (success rate: {skill.success_rate:.0%})")
+            parts.append(f"When to use: {skill.description}")
+            if skill.goal_pattern:
+                parts.append(f"Applies to: {skill.goal_pattern}")
+            if skill.preconditions:
+                parts.append(f"Preconditions: {', '.join(skill.preconditions)}")
             parts.append("Steps:")
-            for i, step in enumerate(skill.steps[:5], 1):
+            for i, step in enumerate(skill.steps[:8], 1):
                 parts.append(f"  {i}. {step}")
+            if skill.postconditions:
+                parts.append(f"Expected result: {', '.join(skill.postconditions)}")
+            parts.append("")
         
         return "\n".join(parts)
+    
+    # ================================ Memory Refinement (Evo-Memory) ================================
+    
+    def refine_memory(self, mas_message: MASMessage) -> MASMessage:
+        """
+        Refine memory after task completion (Evo-Memory Refine step).
+        
+        1. Trajectory compression — keep only key decision points
+        2. Experience deduplication — merge similar trajectories (>0.9 sim)
+        3. Low-value experience deprioritization
+        
+        Called automatically from add_memory.
+        """
+        # 1. Trajectory compression
+        mas_message = self._compress_trajectory(mas_message)
+        
+        # 2. Deduplication check
+        self._deduplicate_experience(mas_message)
+        
+        return mas_message
+    
+    def _compress_trajectory(self, mas_message: MASMessage) -> MASMessage:
+        """
+        Compress trajectory to keep only key actions (skip thinks and no-ops).
+        For successful trajectories, the key_steps already provide a compressed view.
+        For failed ones, keep last 10 steps to understand failure mode.
+        """
+        if not mas_message.task_trajectory:
+            return mas_message
+        
+        lines = mas_message.task_trajectory.split('\n')
+        compressed = []
+        step_count = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            
+            # Skip think actions from trajectory storage
+            if stripped.lower().startswith(('think:', 'thought:', '>think', '>thought')):
+                continue
+            
+            compressed.append(line)
+            if stripped.startswith('>'):
+                step_count += 1
+        
+        # For failed trajectories, keep last N steps
+        if mas_message.label == False and step_count > 10:
+            action_indices = [i for i, l in enumerate(compressed) if l.strip().startswith('>')]
+            if len(action_indices) > 10:
+                cut_idx = action_indices[-10]
+                compressed = ['(... earlier steps omitted ...)'] + compressed[cut_idx:]
+        
+        mas_message.task_trajectory = '\n'.join(compressed)
+        return mas_message
+    
+    def _deduplicate_experience(self, mas_message: MASMessage):
+        """
+        Check if a highly similar experience already exists.
+        If so, update the existing one's metadata instead of adding a new entry.
+        Uses embedding similarity > 0.9 threshold.
+        """
+        try:
+            query_embedding = self.embedding_func.embed_query(mas_message.task_main)
+            existing_docs = self.main_memory.similarity_search_with_score(
+                query=mas_message.task_main,
+                k=3,
+                filter={'label': mas_message.label}
+            )
+            
+            for doc, distance in existing_docs:
+                similarity = 1 - distance
+                if similarity > 0.9:
+                    existing_traj = doc.metadata.get('task_trajectory', '')
+                    if len(existing_traj) > len(mas_message.task_trajectory):
+                        mas_message.add_extra_field('deduplicated', True)
+                        return
+        except Exception:
+            pass
     
     # ================================ Statistics ================================
     
@@ -278,11 +373,6 @@ class GMemoryPlus(GMemory):
         
         if self.skill_miner:
             stats["num_skills"] = len(self.skill_miner.skills)
-        
-        # if self.prompt_evolution:
-        #     stats["prompt_evolution"] = {
-        #         role: self.prompt_evolution.get_stats(role)
-        #         for role in self.prompt_evolution.variants.keys()
-        #     }
+            stats["active_skills"] = len(self.skill_miner.get_active_skills())
         
         return stats

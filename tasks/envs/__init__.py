@@ -3,12 +3,15 @@ import glob
 
 from .base_env import BaseEnv, BaseRecorder
 from .alfworld_env import AlfworldEnv, AlfworldRecorder, get_env_name_from_gamefile, prefixes
+from .math_env import MathEnv, MathRecorder, MathEnvConfig
+from .pddl_env.pddl_env import PDDLEnv, PDDLRecorder, get_all_environment_configs
 
 
 def _get_envs():
     """Lazy env registry to avoid importing SciWorld when not needed."""
     envs = {
         'alfworld': AlfworldEnv,
+        'pddl': PDDLEnv,
     }
     try:
         from .sciworld_env import SciworldEnv
@@ -21,6 +24,7 @@ def _get_recorders():
     """Lazy recorder registry to avoid importing SciWorld when not needed."""
     recorders = {
         'alfworld': AlfworldRecorder,
+        'pddl': PDDLRecorder,
     }
     try:
         from .sciworld_env import SciworldRecorder
@@ -100,5 +104,37 @@ def get_task(task: str) -> list[dict]:
         tmp_env.close()
         print(f"Loaded {len(tasks)} ScienceWorld tasks ({len(all_task_names)} task types)")
         return tasks
+    
+    elif task == 'math':
+        import json
+        data_dir = 'data/math_test' # Default to train for now
+        tasks = []
+        
+        if not os.path.exists(data_dir):
+            print(f"Warning: Math data directory {data_dir} not found.")
+            return []
+
+        for filename in os.listdir(data_dir):
+            if filename.endswith(".jsonl"):
+                path = os.path.join(data_dir, filename)
+                with open(path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            problem_data = json.loads(line)
+                            tasks.append({
+                                'task': problem_data['problem'],
+                                'env_name': 'math',
+                                'env_kwargs': {
+                                    'problem': problem_data,
+                                    'config': 'math'
+                                },
+                                'task_type': problem_data.get('type', 'math')
+                            })
+        # Limit for testing if needed, or return all
+        return tasks
+
+    elif task == 'pddl':
+        TASK_NAMES = ["barman", "blockworld", "gripper", "tyreworld"]
+        return get_all_environment_configs(TASK_NAMES, 'data/pddl/test.jsonl')
 
     raise ValueError(f'Unsupported task type: {task}')
